@@ -24,10 +24,15 @@ import {
   Settings,
   Zap,
   Sparkles,
+  Mail,
+  Send,
+  CheckCircle,
+  AlertCircle,
 } from "lucide-react"
 
 import jsPDF from "jspdf"
 import "jspdf-autotable"
+import emailjs from "@emailjs/browser"
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -38,6 +43,13 @@ const firebaseConfig = {
   messagingSenderId: "326330592783",
   appId: "1:326330592783:web:b1f52f92e4f41b93307d7a",
   measurementId: "G-B906F865D4",
+}
+
+// EmailJS Configuration
+const EMAILJS_CONFIG = {
+  serviceId: "service_digitalslate",
+  templateId: "template_digitalslate",
+  publicKey: "your_emailjs_public_key",
 }
 
 // Default Tag Configuration
@@ -126,11 +138,23 @@ export default function DigitalSlate() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false)
   const [isTagModalOpen, setIsTagModalOpen] = useState(false)
   const [isCustomizeModalOpen, setIsCustomizeModalOpen] = useState(false)
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false)
   const [newTagName, setNewTagName] = useState("")
   const [newTagColor, setNewTagColor] = useState(CUSTOM_TAG_COLORS[0].color)
   const [selectedColorScheme, setSelectedColorScheme] = useState("default")
   const [dateFilter, setDateFilter] = useState({ start: "", end: "" })
   const [showAdvancedStats, setShowAdvancedStats] = useState(false)
+
+  // Email State
+  const [emailData, setEmailData] = useState({
+    to: "",
+    subject: "",
+    message: "",
+    senderName: "",
+    senderEmail: "",
+  })
+  const [isEmailSending, setIsEmailSending] = useState(false)
+  const [emailStatus, setEmailStatus] = useState(null) // 'success', 'error', null
 
   // Novos estados
   const [editingTake, setEditingTake] = useState(null)
@@ -138,6 +162,12 @@ export default function DigitalSlate() {
   const [currentTakePhotos, setCurrentTakePhotos] = useState([])
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
+
+  // Initialize EmailJS
+  useEffect(() => {
+    // Initialize EmailJS with your public key
+    emailjs.init(EMAILJS_CONFIG.publicKey)
+  }, [])
 
   // Firebase Initialization
   useEffect(() => {
@@ -562,11 +592,339 @@ export default function DigitalSlate() {
     return stats
   }
 
+  // Generate PDF function (extracted for reuse)
+  const generatePDF = async () => {
+    const filteredTakes = getFilteredTakes()
+    if (filteredTakes.length === 0) return null
+
+    const colorScheme = PDF_COLOR_SCHEMES[selectedColorScheme]
+
+    try {
+      const doc = new jsPDF()
+      const pageWidth = doc.internal.pageSize.width
+      const pageHeight = doc.internal.pageSize.height
+      const margin = 15
+      const contentWidth = pageWidth - margin * 2
+      let yPosition = 20
+
+      // Header
+      doc.setFillColor(...colorScheme.primary)
+      doc.rect(0, 0, pageWidth, 45, "F")
+
+      if (projectInfo.logo) {
+        try {
+          doc.addImage(projectInfo.logo, "JPEG", margin, 8, 35, 30)
+        } catch (error) {
+          console.warn("⚠️ Erro ao adicionar logo:", error)
+        }
+      }
+
+      doc.setTextColor(0, 0, 0)
+      doc.setFontSize(28)
+      doc.setFont("helvetica", "bold")
+      const titleX = projectInfo.logo ? 55 : margin
+      doc.text("🎬 RELATÓRIO DE TAKES", titleX, 22)
+
+      doc.setFontSize(14)
+      doc.setFont("helvetica", "normal")
+      doc.text(`${projectInfo.scriptTitle || "Projeto de Filmagem"}`, titleX, 32)
+
+      doc.setFontSize(10)
+      doc.setTextColor(60, 60, 60)
+      const filterText =
+        dateFilter.start || dateFilter.end
+          ? `Período: ${dateFilter.start || "Início"} - ${dateFilter.end || "Fim"}`
+          : "Todos os períodos"
+      doc.text(filterText, titleX, 38)
+
+      yPosition = 60
+
+      // Project Information
+      doc.setFillColor(248, 250, 252)
+      doc.rect(margin, yPosition - 5, contentWidth, 50, "F")
+
+      doc.setTextColor(31, 41, 55)
+      doc.setFontSize(16)
+      doc.setFont("helvetica", "bold")
+      doc.text("INFORMAÇÕES DO PROJETO", margin + 5, yPosition + 8)
+
+      doc.setFontSize(11)
+      doc.setFont("helvetica", "normal")
+
+      const projectData = [
+        { label: "Título:", value: projectInfo.scriptTitle || "N/A" },
+        { label: "Diretor:", value: projectInfo.director || "N/A" },
+        { label: "Continuísta:", value: projectInfo.scriptSupervisor || "N/A" },
+        { label: "Produtora:", value: projectInfo.productionCompany || "N/A" },
+        { label: "Data de Gravação:", value: new Date(projectInfo.recordingDate).toLocaleDateString("pt-BR") },
+        { label: "Total de Takes:", value: filteredTakes.length.toString() },
+        { label: "Relatório Gerado:", value: new Date().toLocaleString("pt-BR") },
+      ]
+
+      const leftColumn = projectData.slice(0, 4)
+      const rightColumn = projectData.slice(4)
+
+      leftColumn.forEach((item, index) => {
+        const y = yPosition + 18 + index * 7
+        doc.setFont("helvetica", "bold")
+        doc.text(item.label, margin + 5, y)
+        doc.setFont("helvetica", "normal")
+        doc.text(item.value, margin + 35, y)
+      })
+
+      rightColumn.forEach((item, index) => {
+        const y = yPosition + 18 + index * 7
+        doc.setFont("helvetica", "bold")
+        doc.text(item.label, margin + contentWidth / 2 + 5, y)
+        doc.setFont("helvetica", "normal")
+        doc.text(item.value, margin + contentWidth / 2 + 45, y)
+      })
+
+      yPosition += 65
+
+      // Takes Table
+      if (yPosition > pageHeight - 100) {
+        doc.addPage()
+        yPosition = 20
+      }
+
+      doc.setTextColor(31, 41, 55)
+      doc.setFontSize(16)
+      doc.setFont("helvetica", "bold")
+      doc.text("REGISTRO DE TAKES", margin, yPosition)
+      yPosition += 15
+
+      doc.setFillColor(...colorScheme.secondary)
+      doc.rect(margin, yPosition, contentWidth, 15, "F")
+
+      doc.setTextColor(255, 255, 255)
+      doc.setFontSize(11)
+      doc.setFont("helvetica", "bold")
+
+      const columns = [
+        { title: "CENA", x: margin + 5, width: 25 },
+        { title: "TAKE", x: margin + 35, width: 25 },
+        { title: "ROLO", x: margin + 65, width: 30 },
+        { title: "TIMECODE", x: margin + 100, width: 40 },
+        { title: "TAGS", x: margin + 145, width: 35 },
+        { title: "OBSERVAÇÕES", x: margin + 185, width: 50 },
+      ]
+
+      columns.forEach((col) => {
+        doc.text(col.title, col.x, yPosition + 10)
+      })
+
+      yPosition += 20
+
+      doc.setTextColor(31, 41, 55)
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(10)
+
+      filteredTakes.forEach((take, index) => {
+        if (yPosition > pageHeight - 60) {
+          doc.addPage()
+          yPosition = 20
+
+          doc.setFillColor(...colorScheme.secondary)
+          doc.rect(margin, yPosition, contentWidth, 15, "F")
+          doc.setTextColor(255, 255, 255)
+          doc.setFontSize(11)
+          doc.setFont("helvetica", "bold")
+          doc.text("CENA", margin + 5, yPosition + 10)
+          doc.text("TAKE", margin + 35, yPosition + 10)
+          doc.text("ROLO", margin + 65, yPosition + 10)
+          doc.text("TIMECODE", margin + 100, yPosition + 10)
+          doc.text("TAGS", margin + 145, yPosition + 10)
+          yPosition += 20
+          doc.setTextColor(31, 41, 55)
+          doc.setFont("helvetica", "normal")
+          doc.setFontSize(10)
+        }
+
+        if (index % 2 === 0) {
+          doc.setFillColor(248, 250, 252)
+          doc.rect(margin, yPosition - 2, contentWidth, 25, "F")
+        }
+
+        doc.setFont("helvetica", "bold")
+        doc.text(`Cena ${take.scene} - Take ${take.take}`, margin + 5, yPosition + 8)
+        doc.setFont("helvetica", "normal")
+        doc.text(take.roll || "N/A", margin + 65, yPosition + 8)
+        doc.text(take.timecode || "N/A", margin + 100, yPosition + 8)
+
+        if (take.tags && take.tags.length > 0) {
+          doc.setFontSize(9)
+          doc.setTextColor(80, 80, 80)
+          doc.text(`Tags: ${take.tags.join(", ")}`, margin + 5, yPosition + 15)
+          doc.setFontSize(10)
+          doc.setTextColor(31, 41, 55)
+        }
+
+        yPosition += 25
+
+        if (take.notes && take.notes.trim()) {
+          doc.setFontSize(9)
+          doc.setFont("helvetica", "italic")
+          doc.setTextColor(60, 60, 60)
+          doc.text("Observações:", margin + 5, yPosition + 5)
+
+          const splitNotes = doc.splitTextToSize(take.notes, contentWidth - 20)
+          doc.text(splitNotes, margin + 10, yPosition + 12)
+          yPosition += splitNotes.length * 4 + 10
+
+          doc.setFont("helvetica", "normal")
+          doc.setTextColor(31, 41, 55)
+          doc.setFontSize(10)
+        }
+
+        if (take.photos && take.photos.length > 0) {
+          doc.setFontSize(9)
+          doc.setTextColor(80, 80, 80)
+          doc.text(`Fotos: ${take.photos.length} anexada(s)`, margin + 5, yPosition + 5)
+
+          let photoX = margin + 10
+          take.photos.forEach((photo, photoIndex) => {
+            if (photoX + 30 > pageWidth - margin) {
+              photoX = margin + 10
+              yPosition += 35
+            }
+
+            try {
+              doc.addImage(photo.data, "JPEG", photoX, yPosition + 8, 25, 25)
+              photoX += 30
+            } catch (error) {
+              console.warn("Erro ao adicionar foto ao PDF:", error)
+            }
+          })
+
+          yPosition += 35
+          doc.setFontSize(10)
+          doc.setTextColor(31, 41, 55)
+        }
+
+        doc.setFontSize(8)
+        doc.setTextColor(120, 120, 120)
+        doc.text(new Date(take.timestamp).toLocaleString("pt-BR"), pageWidth - 80, yPosition + 5)
+
+        yPosition += 15
+
+        doc.setDrawColor(200, 200, 200)
+        doc.line(margin, yPosition, pageWidth - margin, yPosition)
+        yPosition += 10
+      })
+
+      if (showAdvancedStats && filteredTakes.length > 0) {
+        doc.addPage()
+        yPosition = 20
+
+        const stats = getAdvancedStats(filteredTakes)
+
+        doc.setFillColor(...colorScheme.primary)
+        doc.rect(0, 0, pageWidth, 40, "F")
+
+        doc.setTextColor(0, 0, 0)
+        doc.setFontSize(24)
+        doc.setFont("helvetica", "bold")
+        doc.text("📊 ESTATÍSTICAS DETALHADAS", margin, 25)
+
+        yPosition = 55
+
+        const statBoxes = [
+          { label: "Total de Takes", value: stats.totalTakes, color: colorScheme.accent, desc: "takes registrados" },
+          {
+            label: "Cenas Filmadas",
+            value: stats.scenesCount,
+            color: colorScheme.secondary,
+            desc: "cenas diferentes",
+          },
+          { label: "Rolos Utilizados", value: stats.rollsCount, color: colorScheme.primary, desc: "rolos de filme" },
+        ]
+
+        statBoxes.forEach((stat, index) => {
+          const x = margin + index * 60
+
+          doc.setFillColor(...stat.color)
+          doc.rect(x, yPosition, 55, 35, "F")
+
+          doc.setTextColor(255, 255, 255)
+          doc.setFontSize(20)
+          doc.setFont("helvetica", "bold")
+          doc.text(stat.value.toString(), x + 27.5, yPosition + 18, { align: "center" })
+
+          doc.setFontSize(9)
+          doc.setFont("helvetica", "bold")
+          doc.text(stat.label, x + 27.5, yPosition + 26, { align: "center" })
+
+          doc.setFontSize(7)
+          doc.setFont("helvetica", "normal")
+          doc.text(stat.desc, x + 27.5, yPosition + 31, { align: "center" })
+        })
+
+        yPosition += 50
+
+        if (Object.keys(stats.tagsCount).length > 0) {
+          doc.setTextColor(31, 41, 55)
+          doc.setFontSize(16)
+          doc.setFont("helvetica", "bold")
+          doc.text("ANÁLISE DE TAGS", margin, yPosition)
+
+          yPosition += 15
+
+          const sortedTags = Object.entries(stats.tagsCount).sort(([, a], [, b]) => b - a)
+
+          sortedTags.forEach(([tag, count], index) => {
+            const percentage = Math.round((count / stats.totalTakes) * 100)
+            const barWidth = (percentage / 100) * (contentWidth - 80)
+
+            doc.setFontSize(11)
+            doc.setFont("helvetica", "bold")
+            doc.text(`${tag}:`, margin, yPosition + 8)
+
+            doc.setFont("helvetica", "normal")
+            doc.text(`${count} takes (${percentage}%)`, margin + 60, yPosition + 8)
+
+            doc.setFillColor(220, 220, 220)
+            doc.rect(margin + 120, yPosition + 3, contentWidth - 140, 8, "F")
+
+            doc.setFillColor(...colorScheme.accent)
+            doc.rect(margin + 120, yPosition + 3, barWidth, 8, "F")
+
+            yPosition += 15
+          })
+        }
+      }
+
+      const totalPages = doc.internal.getNumberOfPages()
+      for (let i = 1; i <= totalPages; i++) {
+        doc.setPage(i)
+        doc.setFillColor(...colorScheme.primary)
+        doc.rect(0, pageHeight - 18, pageWidth, 18, "F")
+
+        doc.setTextColor(0, 0, 0)
+        doc.setFontSize(9)
+        doc.setFont("helvetica", "normal")
+        doc.text(
+          `Digital Slate • ${projectInfo.productionCompany || "Produção Cinematográfica"}`,
+          margin,
+          pageHeight - 8,
+        )
+        doc.text(`Página ${i} de ${totalPages} • ${colorScheme.name}`, pageWidth - 80, pageHeight - 8)
+
+        doc.setFontSize(7)
+        doc.setTextColor(60, 60, 60)
+        doc.text(`Gerado em ${new Date().toLocaleString("pt-BR")}`, margin, pageHeight - 3)
+      }
+
+      return doc
+    } catch (error) {
+      console.error("❌ Erro ao gerar PDF:", error)
+      throw error
+    }
+  }
+
   const handleExport = async (type) => {
     const filteredTakes = getFilteredTakes()
     if (filteredTakes.length === 0) return
-
-    const colorScheme = PDF_COLOR_SCHEMES[selectedColorScheme]
 
     if (type === "csv") {
       let content = "Cena,Take,Rolo,Timecode,Tags,Anotações,Data/Hora\n"
@@ -589,330 +947,86 @@ export default function DigitalSlate() {
       URL.revokeObjectURL(url)
     } else if (type === "pdf") {
       try {
-        const doc = new jsPDF()
-        const pageWidth = doc.internal.pageSize.width
-        const pageHeight = doc.internal.pageSize.height
-        const margin = 15
-        const contentWidth = pageWidth - margin * 2
-        let yPosition = 20
-
-        // Header
-        doc.setFillColor(...colorScheme.primary)
-        doc.rect(0, 0, pageWidth, 45, "F")
-
-        if (projectInfo.logo) {
-          try {
-            doc.addImage(projectInfo.logo, "JPEG", margin, 8, 35, 30)
-          } catch (error) {
-            console.warn("⚠️ Erro ao adicionar logo:", error)
-          }
+        const doc = await generatePDF()
+        if (doc) {
+          const filename = `relatorio-takes-${projectInfo.scriptTitle || "projeto"}-${new Date().toISOString().slice(0, 10)}.pdf`
+          doc.save(filename)
         }
-
-        doc.setTextColor(0, 0, 0)
-        doc.setFontSize(28)
-        doc.setFont("helvetica", "bold")
-        const titleX = projectInfo.logo ? 55 : margin
-        doc.text("🎬 RELATÓRIO DE TAKES", titleX, 22)
-
-        doc.setFontSize(14)
-        doc.setFont("helvetica", "normal")
-        doc.text(`${projectInfo.scriptTitle || "Projeto de Filmagem"}`, titleX, 32)
-
-        doc.setFontSize(10)
-        doc.setTextColor(60, 60, 60)
-        const filterText =
-          dateFilter.start || dateFilter.end
-            ? `Período: ${dateFilter.start || "Início"} - ${dateFilter.end || "Fim"}`
-            : "Todos os períodos"
-        doc.text(filterText, titleX, 38)
-
-        yPosition = 60
-
-        // Project Information
-        doc.setFillColor(248, 250, 252)
-        doc.rect(margin, yPosition - 5, contentWidth, 50, "F")
-
-        doc.setTextColor(31, 41, 55)
-        doc.setFontSize(16)
-        doc.setFont("helvetica", "bold")
-        doc.text("INFORMAÇÕES DO PROJETO", margin + 5, yPosition + 8)
-
-        doc.setFontSize(11)
-        doc.setFont("helvetica", "normal")
-
-        const projectData = [
-          { label: "Título:", value: projectInfo.scriptTitle || "N/A" },
-          { label: "Diretor:", value: projectInfo.director || "N/A" },
-          { label: "Continuísta:", value: projectInfo.scriptSupervisor || "N/A" },
-          { label: "Produtora:", value: projectInfo.productionCompany || "N/A" },
-          { label: "Data de Gravação:", value: new Date(projectInfo.recordingDate).toLocaleDateString("pt-BR") },
-          { label: "Total de Takes:", value: filteredTakes.length.toString() },
-          { label: "Relatório Gerado:", value: new Date().toLocaleString("pt-BR") },
-        ]
-
-        const leftColumn = projectData.slice(0, 4)
-        const rightColumn = projectData.slice(4)
-
-        leftColumn.forEach((item, index) => {
-          const y = yPosition + 18 + index * 7
-          doc.setFont("helvetica", "bold")
-          doc.text(item.label, margin + 5, y)
-          doc.setFont("helvetica", "normal")
-          doc.text(item.value, margin + 35, y)
-        })
-
-        rightColumn.forEach((item, index) => {
-          const y = yPosition + 18 + index * 7
-          doc.setFont("helvetica", "bold")
-          doc.text(item.label, margin + contentWidth / 2 + 5, y)
-          doc.setFont("helvetica", "normal")
-          doc.text(item.value, margin + contentWidth / 2 + 45, y)
-        })
-
-        yPosition += 65
-
-        // Takes Table
-        if (yPosition > pageHeight - 100) {
-          doc.addPage()
-          yPosition = 20
-        }
-
-        doc.setTextColor(31, 41, 55)
-        doc.setFontSize(16)
-        doc.setFont("helvetica", "bold")
-        doc.text("REGISTRO DE TAKES", margin, yPosition)
-        yPosition += 15
-
-        doc.setFillColor(...colorScheme.secondary)
-        doc.rect(margin, yPosition, contentWidth, 15, "F")
-
-        doc.setTextColor(255, 255, 255)
-        doc.setFontSize(11)
-        doc.setFont("helvetica", "bold")
-
-        const columns = [
-          { title: "CENA", x: margin + 5, width: 25 },
-          { title: "TAKE", x: margin + 35, width: 25 },
-          { title: "ROLO", x: margin + 65, width: 30 },
-          { title: "TIMECODE", x: margin + 100, width: 40 },
-          { title: "TAGS", x: margin + 145, width: 35 },
-          { title: "OBSERVAÇÕES", x: margin + 185, width: 50 },
-        ]
-
-        columns.forEach((col) => {
-          doc.text(col.title, col.x, yPosition + 10)
-        })
-
-        yPosition += 20
-
-        doc.setTextColor(31, 41, 55)
-        doc.setFont("helvetica", "normal")
-        doc.setFontSize(10)
-
-        filteredTakes.forEach((take, index) => {
-          if (yPosition > pageHeight - 60) {
-            doc.addPage()
-            yPosition = 20
-
-            doc.setFillColor(...colorScheme.secondary)
-            doc.rect(margin, yPosition, contentWidth, 15, "F")
-            doc.setTextColor(255, 255, 255)
-            doc.setFontSize(11)
-            doc.setFont("helvetica", "bold")
-            doc.text("CENA", margin + 5, yPosition + 10)
-            doc.text("TAKE", margin + 35, yPosition + 10)
-            doc.text("ROLO", margin + 65, yPosition + 10)
-            doc.text("TIMECODE", margin + 100, yPosition + 10)
-            doc.text("TAGS", margin + 145, yPosition + 10)
-            yPosition += 20
-            doc.setTextColor(31, 41, 55)
-            doc.setFont("helvetica", "normal")
-            doc.setFontSize(10)
-          }
-
-          if (index % 2 === 0) {
-            doc.setFillColor(248, 250, 252)
-            doc.rect(margin, yPosition - 2, contentWidth, 25, "F")
-          }
-
-          doc.setFont("helvetica", "bold")
-          doc.text(`Cena ${take.scene} - Take ${take.take}`, margin + 5, yPosition + 8)
-          doc.setFont("helvetica", "normal")
-          doc.text(take.roll || "N/A", margin + 65, yPosition + 8)
-          doc.text(take.timecode || "N/A", margin + 100, yPosition + 8)
-
-          if (take.tags && take.tags.length > 0) {
-            doc.setFontSize(9)
-            doc.setTextColor(80, 80, 80)
-            doc.text(`Tags: ${take.tags.join(", ")}`, margin + 5, yPosition + 15)
-            doc.setFontSize(10)
-            doc.setTextColor(31, 41, 55)
-          }
-
-          yPosition += 25
-
-          if (take.notes && take.notes.trim()) {
-            doc.setFontSize(9)
-            doc.setFont("helvetica", "italic")
-            doc.setTextColor(60, 60, 60)
-            doc.text("Observações:", margin + 5, yPosition + 5)
-
-            const splitNotes = doc.splitTextToSize(take.notes, contentWidth - 20)
-            doc.text(splitNotes, margin + 10, yPosition + 12)
-            yPosition += splitNotes.length * 4 + 10
-
-            doc.setFont("helvetica", "normal")
-            doc.setTextColor(31, 41, 55)
-            doc.setFontSize(10)
-          }
-
-          if (take.photos && take.photos.length > 0) {
-            doc.setFontSize(9)
-            doc.setTextColor(80, 80, 80)
-            doc.text(`Fotos: ${take.photos.length} anexada(s)`, margin + 5, yPosition + 5)
-
-            let photoX = margin + 10
-            take.photos.forEach((photo, photoIndex) => {
-              if (photoX + 30 > pageWidth - margin) {
-                photoX = margin + 10
-                yPosition += 35
-              }
-
-              try {
-                doc.addImage(photo.data, "JPEG", photoX, yPosition + 8, 25, 25)
-                photoX += 30
-              } catch (error) {
-                console.warn("Erro ao adicionar foto ao PDF:", error)
-              }
-            })
-
-            yPosition += 35
-            doc.setFontSize(10)
-            doc.setTextColor(31, 41, 55)
-          }
-
-          doc.setFontSize(8)
-          doc.setTextColor(120, 120, 120)
-          doc.text(new Date(take.timestamp).toLocaleString("pt-BR"), pageWidth - 80, yPosition + 5)
-
-          yPosition += 15
-
-          doc.setDrawColor(200, 200, 200)
-          doc.line(margin, yPosition, pageWidth - margin, yPosition)
-          yPosition += 10
-        })
-
-        if (showAdvancedStats && filteredTakes.length > 0) {
-          doc.addPage()
-          yPosition = 20
-
-          const stats = getAdvancedStats(filteredTakes)
-
-          doc.setFillColor(...colorScheme.primary)
-          doc.rect(0, 0, pageWidth, 40, "F")
-
-          doc.setTextColor(0, 0, 0)
-          doc.setFontSize(24)
-          doc.setFont("helvetica", "bold")
-          doc.text("📊 ESTATÍSTICAS DETALHADAS", margin, 25)
-
-          yPosition = 55
-
-          const statBoxes = [
-            { label: "Total de Takes", value: stats.totalTakes, color: colorScheme.accent, desc: "takes registrados" },
-            {
-              label: "Cenas Filmadas",
-              value: stats.scenesCount,
-              color: colorScheme.secondary,
-              desc: "cenas diferentes",
-            },
-            { label: "Rolos Utilizados", value: stats.rollsCount, color: colorScheme.primary, desc: "rolos de filme" },
-          ]
-
-          statBoxes.forEach((stat, index) => {
-            const x = margin + index * 60
-
-            doc.setFillColor(...stat.color)
-            doc.rect(x, yPosition, 55, 35, "F")
-
-            doc.setTextColor(255, 255, 255)
-            doc.setFontSize(20)
-            doc.setFont("helvetica", "bold")
-            doc.text(stat.value.toString(), x + 27.5, yPosition + 18, { align: "center" })
-
-            doc.setFontSize(9)
-            doc.setFont("helvetica", "bold")
-            doc.text(stat.label, x + 27.5, yPosition + 26, { align: "center" })
-
-            doc.setFontSize(7)
-            doc.setFont("helvetica", "normal")
-            doc.text(stat.desc, x + 27.5, yPosition + 31, { align: "center" })
-          })
-
-          yPosition += 50
-
-          if (Object.keys(stats.tagsCount).length > 0) {
-            doc.setTextColor(31, 41, 55)
-            doc.setFontSize(16)
-            doc.setFont("helvetica", "bold")
-            doc.text("ANÁLISE DE TAGS", margin, yPosition)
-
-            yPosition += 15
-
-            const sortedTags = Object.entries(stats.tagsCount).sort(([, a], [, b]) => b - a)
-
-            sortedTags.forEach(([tag, count], index) => {
-              const percentage = Math.round((count / stats.totalTakes) * 100)
-              const barWidth = (percentage / 100) * (contentWidth - 80)
-
-              doc.setFontSize(11)
-              doc.setFont("helvetica", "bold")
-              doc.text(`${tag}:`, margin, yPosition + 8)
-
-              doc.setFont("helvetica", "normal")
-              doc.text(`${count} takes (${percentage}%)`, margin + 60, yPosition + 8)
-
-              doc.setFillColor(220, 220, 220)
-              doc.rect(margin + 120, yPosition + 3, contentWidth - 140, 8, "F")
-
-              doc.setFillColor(...colorScheme.accent)
-              doc.rect(margin + 120, yPosition + 3, barWidth, 8, "F")
-
-              yPosition += 15
-            })
-          }
-        }
-
-        const totalPages = doc.internal.getNumberOfPages()
-        for (let i = 1; i <= totalPages; i++) {
-          doc.setPage(i)
-          doc.setFillColor(...colorScheme.primary)
-          doc.rect(0, pageHeight - 18, pageWidth, 18, "F")
-
-          doc.setTextColor(0, 0, 0)
-          doc.setFontSize(9)
-          doc.setFont("helvetica", "normal")
-          doc.text(
-            `Digital Slate • ${projectInfo.productionCompany || "Produção Cinematográfica"}`,
-            margin,
-            pageHeight - 8,
-          )
-          doc.text(`Página ${i} de ${totalPages} • ${colorScheme.name}`, pageWidth - 80, pageHeight - 8)
-
-          doc.setFontSize(7)
-          doc.setTextColor(60, 60, 60)
-          doc.text(`Gerado em ${new Date().toLocaleString("pt-BR")}`, margin, pageHeight - 3)
-        }
-
-        const filename = `relatorio-takes-${projectInfo.scriptTitle || "projeto"}-${new Date().toISOString().slice(0, 10)}.pdf`
-        doc.save(filename)
       } catch (error) {
-        console.error("❌ Erro ao gerar PDF:", error)
         alert(`Erro ao gerar PDF: ${error.message}`)
       }
+    } else if (type === "email") {
+      // Open email modal
+      setEmailData({
+        to: "",
+        subject: `Relatório de Takes - ${projectInfo.scriptTitle || "Projeto"}`,
+        message: `Olá,\n\nSegue em anexo o relatório de takes do projeto "${projectInfo.scriptTitle || "Projeto"}".\n\nDetalhes do projeto:\n- Diretor: ${projectInfo.director || "N/A"}\n- Data de Gravação: ${new Date(projectInfo.recordingDate).toLocaleDateString("pt-BR")}\n- Total de Takes: ${filteredTakes.length}\n\nAtenciosamente,\n${emailData.senderName || "Equipe de Produção"}`,
+        senderName: emailData.senderName || "",
+        senderEmail: emailData.senderEmail || "",
+      })
+      setIsEmailModalOpen(true)
+      return
     }
 
     setIsExportModalOpen(false)
+  }
+
+  const handleSendEmail = async () => {
+    if (!emailData.to || !emailData.senderName || !emailData.senderEmail) {
+      alert("Por favor, preencha todos os campos obrigatórios.")
+      return
+    }
+
+    setIsEmailSending(true)
+    setEmailStatus(null)
+
+    try {
+      // Generate PDF
+      const doc = await generatePDF()
+      if (!doc) {
+        throw new Error("Erro ao gerar PDF")
+      }
+
+      // Convert PDF to base64
+      const pdfBase64 = doc.output("datauristring").split(",")[1]
+
+      // Prepare email data
+      const templateParams = {
+        to_email: emailData.to,
+        from_name: emailData.senderName,
+        from_email: emailData.senderEmail,
+        subject: emailData.subject,
+        message: emailData.message,
+        project_title: projectInfo.scriptTitle || "Projeto",
+        director: projectInfo.director || "N/A",
+        recording_date: new Date(projectInfo.recordingDate).toLocaleDateString("pt-BR"),
+        total_takes: getFilteredTakes().length,
+        pdf_attachment: pdfBase64,
+        filename: `relatorio-takes-${projectInfo.scriptTitle || "projeto"}-${new Date().toISOString().slice(0, 10)}.pdf`,
+      }
+
+      // Send email using EmailJS
+      const response = await emailjs.send(
+        EMAILJS_CONFIG.serviceId,
+        EMAILJS_CONFIG.templateId,
+        templateParams,
+        EMAILJS_CONFIG.publicKey,
+      )
+
+      console.log("Email enviado com sucesso:", response)
+      setEmailStatus("success")
+
+      // Close modal after 2 seconds
+      setTimeout(() => {
+        setIsEmailModalOpen(false)
+        setEmailStatus(null)
+      }, 2000)
+    } catch (error) {
+      console.error("Erro ao enviar email:", error)
+      setEmailStatus("error")
+    } finally {
+      setIsEmailSending(false)
+    }
   }
 
   useEffect(() => {
@@ -1614,7 +1728,7 @@ export default function DigitalSlate() {
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center space-x-2">
                 <Download size={24} className="text-blue-400" />
-                <h2 className="text-xl font-bold text-white">Exportar Relatórios</h2>
+                <h2 className="text-xl font-bold text-white">Exportar & Enviar Relatórios</h2>
               </div>
               <button
                 onClick={() => setIsExportModalOpen(false)}
@@ -1661,6 +1775,17 @@ export default function DigitalSlate() {
                     </div>
                   </div>
                 </button>
+
+                <button
+                  onClick={() => handleExport("email")}
+                  className="w-full flex items-center space-x-4 p-4 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 hover:border-cyan-500/50 rounded-xl transition-all group"
+                >
+                  <Mail size={24} className="text-cyan-400" />
+                  <div className="text-left">
+                    <div className="font-semibold text-cyan-400">Enviar por Email</div>
+                    <div className="text-sm text-cyan-300/70">PDF anexado automaticamente</div>
+                  </div>
+                </button>
               </div>
             </div>
 
@@ -1670,6 +1795,139 @@ export default function DigitalSlate() {
                 className="py-2 px-4 bg-slate-700/50 hover:bg-slate-600/50 text-slate-300 rounded-xl transition-all font-medium"
               >
                 Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Email Modal */}
+      {isEmailModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl p-6 w-full max-w-lg border border-slate-700/50">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center space-x-2">
+                <Mail size={24} className="text-cyan-400" />
+                <h2 className="text-xl font-bold text-white">Enviar Relatório por Email</h2>
+              </div>
+              <button
+                onClick={() => setIsEmailModalOpen(false)}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {emailStatus === "success" && (
+              <div className="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/30 rounded-xl flex items-center space-x-3">
+                <CheckCircle className="text-emerald-400" size={20} />
+                <div>
+                  <p className="text-emerald-400 font-medium">Email enviado com sucesso!</p>
+                  <p className="text-emerald-300/70 text-sm">O relatório foi enviado para {emailData.to}</p>
+                </div>
+              </div>
+            )}
+
+            {emailStatus === "error" && (
+              <div className="mb-6 p-4 bg-rose-500/20 border border-rose-500/30 rounded-xl flex items-center space-x-3">
+                <AlertCircle className="text-rose-400" size={20} />
+                <div>
+                  <p className="text-rose-400 font-medium">Erro ao enviar email</p>
+                  <p className="text-rose-300/70 text-sm">Verifique os dados e tente novamente</p>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-300">Seu Nome *</label>
+                  <input
+                    type="text"
+                    value={emailData.senderName}
+                    onChange={(e) => setEmailData((prev) => ({ ...prev, senderName: e.target.value }))}
+                    placeholder="Seu nome completo"
+                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/50 focus:outline-none transition-all placeholder-slate-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-300">Seu Email *</label>
+                  <input
+                    type="email"
+                    value={emailData.senderEmail}
+                    onChange={(e) => setEmailData((prev) => ({ ...prev, senderEmail: e.target.value }))}
+                    placeholder="seu@email.com"
+                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/50 focus:outline-none transition-all placeholder-slate-500"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-300">Destinatário *</label>
+                <input
+                  type="email"
+                  value={emailData.to}
+                  onChange={(e) => setEmailData((prev) => ({ ...prev, to: e.target.value }))}
+                  placeholder="destinatario@email.com"
+                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/50 focus:outline-none transition-all placeholder-slate-500"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-300">Assunto</label>
+                <input
+                  type="text"
+                  value={emailData.subject}
+                  onChange={(e) => setEmailData((prev) => ({ ...prev, subject: e.target.value }))}
+                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/50 focus:outline-none transition-all"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-300">Mensagem</label>
+                <textarea
+                  value={emailData.message}
+                  onChange={(e) => setEmailData((prev) => ({ ...prev, message: e.target.value }))}
+                  rows={6}
+                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/50 focus:outline-none transition-all placeholder-slate-500 resize-none"
+                />
+              </div>
+
+              <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700/30">
+                <p className="text-sm text-slate-400 mb-2">📎 Anexo incluído:</p>
+                <p className="text-sm text-slate-300 font-medium">
+                  relatorio-takes-{projectInfo.scriptTitle || "projeto"}-{new Date().toISOString().slice(0, 10)}.pdf
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {getFilteredTakes().length} takes • {PDF_COLOR_SCHEMES[selectedColorScheme].name}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-3 mt-8">
+              <button
+                onClick={() => setIsEmailModalOpen(false)}
+                className="py-2 px-4 bg-slate-700/50 hover:bg-slate-600/50 text-slate-300 rounded-xl transition-all font-medium"
+                disabled={isEmailSending}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSendEmail}
+                disabled={isEmailSending || !emailData.to || !emailData.senderName || !emailData.senderEmail}
+                className="py-2 px-4 bg-gradient-to-r from-cyan-500 to-cyan-600 hover:from-cyan-600 hover:to-cyan-700 text-white rounded-xl transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+              >
+                {isEmailSending ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                    <span>Enviando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send size={16} />
+                    <span>Enviar Email</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
